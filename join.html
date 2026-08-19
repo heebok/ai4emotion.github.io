@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Join Tour — Smart Tour Guide</title>
+<style>
+  :root {
+    --green: #1b5e20;
+    --green-light: #e8f5e9;
+    --ink: #1b1f1c;
+    --muted: #5f6b63;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f7faf7;
+    color: var(--ink);
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .card {
+    max-width: 420px;
+    width: 100%;
+    background: #fff;
+    border-radius: 20px;
+    padding: 32px 24px;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.06);
+    text-align: center;
+  }
+  .flag {
+    font-size: 40px;
+    margin-bottom: 8px;
+  }
+  h1 {
+    font-size: 22px;
+    margin: 0 0 4px;
+  }
+  .tourname {
+    color: var(--muted);
+    font-size: 15px;
+    margin-bottom: 24px;
+  }
+  .code-box {
+    background: var(--green-light);
+    border: 2px dashed var(--green);
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 24px;
+  }
+  .code-label {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  .code {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: 4px;
+    color: var(--green);
+    font-family: "SF Mono", "Roboto Mono", monospace;
+  }
+  .copy-btn {
+    margin-top: 10px;
+    background: none;
+    border: 1px solid var(--green);
+    color: var(--green);
+    border-radius: 20px;
+    padding: 6px 16px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .copy-btn:active { opacity: 0.7; }
+  .store-btn {
+    display: block;
+    width: 100%;
+    padding: 14px;
+    border-radius: 14px;
+    background: var(--green);
+    color: #fff;
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 16px;
+    margin-bottom: 12px;
+  }
+  .store-btn.secondary {
+    background: #fff;
+    color: var(--green);
+    border: 1.5px solid var(--green);
+  }
+  .steps {
+    text-align: left;
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid #eee;
+  }
+  .steps ol { margin: 8px 0 0; padding-left: 20px; }
+  .have-app {
+    margin-top: 18px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .have-app a { color: var(--green); font-weight: 600; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="flag">🚩</div>
+    <h1>You've been invited to a tour</h1>
+    <div class="tourname" id="tourname">Loading…</div>
+
+    <div class="code-box">
+      <div class="code-label">Your tour code</div>
+      <div class="code" id="code">------</div>
+      <button class="copy-btn" onclick="copyCode()">Copy code</button>
+    </div>
+
+    <div id="store-buttons"></div>
+
+    <div class="steps">
+      <strong>How to join:</strong>
+      <ol>
+        <li>Install Smart Tour Guide from the button above.</li>
+        <li>Open the app and tap "Join as Tourist".</li>
+        <li>Tap "Enter tour code" and type (or paste) the code above.</li>
+      </ol>
+    </div>
+
+    <div class="have-app">
+      Already have the app? Open it and tap "Enter tour code" — no need to reinstall.
+    </div>
+  </div>
+
+  <script>
+    const IOS_URL = "https://apps.apple.com/us/app/ai-smart-tour-guide/id6797437190?l=ko";
+    const ANDROID_URL = "https://play.google.com/store/apps/details?id=com.heebok.smart_tour_guide";
+
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code') || '';
+    const name = params.get('name') || 'Tour';
+
+    document.getElementById('code').textContent = code || '------';
+    document.getElementById('tourname').textContent = name;
+
+    function copyCode() {
+      navigator.clipboard.writeText(code).then(() => {
+        const btn = document.querySelector('.copy-btn');
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      });
+    }
+
+    // 기종을 감지해서 맞는 스토어 버튼을 먼저 보여준다.
+    const ua = navigator.userAgent || navigator.vendor || window.opera;
+    const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+    const isAndroid = /android/i.test(ua);
+
+    const container = document.getElementById('store-buttons');
+    const iosBtn = `<a class="store-btn" href="${IOS_URL}">Download for iPhone</a>`;
+    const androidBtn = `<a class="store-btn" href="${ANDROID_URL}">Download for Android</a>`;
+
+    if (isIOS) {
+      container.innerHTML = iosBtn +
+        `<a class="store-btn secondary" href="${ANDROID_URL}">Download for Android instead</a>`;
+    } else if (isAndroid) {
+      container.innerHTML = androidBtn +
+        `<a class="store-btn secondary" href="${IOS_URL}">Download for iPhone instead</a>`;
+    } else {
+      // 데스크톱 등: 둘 다 보여준다.
+      container.innerHTML = iosBtn + androidBtn;
+    }
+  </script>
+</body>
+</html>
