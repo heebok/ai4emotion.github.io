@@ -1,0 +1,578 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TECHNICAL ENGINEERING GUIDE STAGE4B1 EN</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;max-width:1050px;margin:36px auto;padding:0 24px;line-height:1.58;color:#1d2733}h1,h2,h3{color:#0b3954}h1{border-bottom:3px solid #42a5f5;padding-bottom:12px}h2{margin-top:34px;border-bottom:1px solid #dbe4ec;padding-bottom:6px}code,pre{font-family:SFMono-Regular,Consolas,monospace;background:#f4f7f9}code{padding:2px 4px;border-radius:4px}pre{padding:12px;border-radius:8px;overflow:auto;border:1px solid #dce5eb}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccd7df;padding:8px;vertical-align:top}blockquote{border-left:4px solid #42a5f5;padding-left:14px;color:#52606d}</style></head><body><h1>Antenna Safety Simulator — Technical Engineering Guide</h1>
+<p><strong>Stage 4B-1 · Naval and Aircraft RF Co-Site / Near-Field / LNA Safety Modeling</strong></p>
+<h2>1. Purpose of This Guide</h2>
+<p>This document explains the physical principles, equations, computational approximations, and implementation choices used during development of the Antenna Safety Simulator. It is intentionally more detailed than the User Manual.</p>
+<p>The simulator is designed for interactive engineering screening of RF coupling from one or more transmitters into a candidate receiver/LNA on simplified ship and aircraft platforms. The app combines:</p>
+<ul>
+<li>electromagnetic field-region classification,</li>
+<li>directional antenna gain,</li>
+<li>Friis-style far-field transfer,</li>
+<li>approximate Fresnel-region corrections,</li>
+<li>reactive-near-field screening corrections,</li>
+<li>polarization mismatch,</li>
+<li>structural obstruction / knife-edge screening,</li>
+<li>measured or simulated S21 override,</li>
+<li>pulse duty-cycle averaging,</li>
+<li>multiple-transmitter aggregation,</li>
+<li>receiver/LNA damage-threshold logic,</li>
+<li>3D field-zone visualization,</li>
+<li>aircraft curved-surface propagation,</li>
+<li>creeping-wave approximation,</li>
+<li>helicopter rotor shadowing and Rotor Blade Modulation (RBM),</li>
+<li>worst-case rotor-angle search.</li>
+</ul>
+<p>The user-supplied aircraft report motivated the Aircraft track's emphasis on co-site interference, near-field coupling, curved fuselage propagation, rotor shadowing, RBM, desensitization, and LNA protection. The report also makes clear that platform-specific material, antenna, and installation data are essential. Accordingly, several software coefficients are deliberately user-tunable rather than treated as universal constants.</p>
+<hr />
+<h1>2. Units and Coordinate Systems</h1>
+<p>The internal coordinate unit is <strong>meter</strong>. Frequency is stored in <strong>Hz</strong>. Power quantities use <strong>dBm</strong>. Gain/loss quantities use <strong>dB/dBi</strong>.</p>
+<h3>Naval</h3>
+<ul>
+<li>+X: Bow</li>
+<li>+Y: Starboard</li>
+<li>−Y: Port</li>
+<li>+Z: upward / height</li>
+</ul>
+<h3>Aircraft</h3>
+<ul>
+<li>+X: Nose</li>
+<li>+Y: Starboard</li>
+<li>−Y: Port</li>
+<li>+Z: Up</li>
+</ul>
+<p>For an antenna boresight with azimuth φ and elevation θ, the unit vector is</p>
+<pre><code class="language-text">b = (cos θ cos φ, cos θ sin φ, sin θ)
+</code></pre>
+<p>with angles converted to radians for numerical evaluation.</p>
+<p>For two vectors a and b, the off-axis angle is</p>
+<pre><code class="language-text">ψ = arccos[(a · b) / (|a||b|)]
+</code></pre>
+<hr />
+<h1>3. Wavelength</h1>
+<p>The fundamental wavelength calculation is</p>
+<pre><code class="language-text">λ = c / f
+</code></pre>
+<p>where</p>
+<ul>
+<li>c = 299,792,458 m/s</li>
+<li>f = transmitter frequency in Hz</li>
+<li>λ = wavelength in meters</li>
+</ul>
+<p>The transmitter frequency controls wavelength, free-space path loss, near/far-field boundaries, Fresnel phase curvature, and diffraction parameters.</p>
+<hr />
+<h1>4. Electromagnetic Field-Region Classification</h1>
+<p>Let D be the larger of the transmitter and receiver maximum linear antenna dimensions used for the link-region classifier.</p>
+<p>For electrically large antennas (<code>D ≥ λ/2</code>), the implementation uses:</p>
+<pre><code class="language-text">Reactive-near-field boundary:
+R1 = 0.62 √(D³ / λ)
+
+Far-field boundary:
+RF = max(R1, 2D² / λ)
+</code></pre>
+<p>The regions are then</p>
+<pre><code class="language-text">r ≤ R1            → Reactive Near Field
+R1 &lt; r &lt; RF       → Radiating Near Field / Fresnel Region
+r ≥ RF            → Far Field / Fraunhofer Region
+</code></pre>
+<p>For electrically small antennas (<code>D &lt; λ/2</code>), the app uses the practical fallback:</p>
+<pre><code class="language-text">R1 = λ / (2π)
+RF = λ
+</code></pre>
+<p>This small-antenna fallback is an implementation choice designed to avoid meaningless zero/tiny aperture boundaries when a compact monopole/dipole dimension is entered.</p>
+<h3>Field-Zone Visualization</h3>
+<p>For each transmitter alone, the 3D visualization computes field boundaries using the transmitter dimension. The <strong>shell</strong> represents the theoretical region boundary. The <strong>fog</strong> is only a visual aid and may be mildly directionally shaped; it does not redefine the theoretical radius.</p>
+<hr />
+<h1>5. Baseline Far-Field Transfer</h1>
+<p>For direct spatial modeling, the simulator begins from a Friis-like link budget.</p>
+<p>Free-space path loss:</p>
+<pre><code class="language-text">FSPL = 20 log10(4πr / λ)
+</code></pre>
+<p>The baseline peak receiver input is</p>
+<pre><code class="language-text">Pr,peak = Pt
+        + Gt,eff
+        + Gr,eff
+        - FSPL
+        - Lpol
+        + Cregion
+        - Lobstruction
+        - Lfilter
+        - Lcable
+        - Llimiter
+</code></pre>
+<p>where:</p>
+<ul>
+<li>Pt: transmitter power at the antenna reference plane [dBm]</li>
+<li>Gt,eff: effective TX directional gain [dBi]</li>
+<li>Gr,eff: effective RX directional gain [dBi]</li>
+<li>Lpol: polarization mismatch loss [dB]</li>
+<li>Cregion: near/Fresnel correction [dB]</li>
+<li>Lobstruction: structural / surface propagation loss [dB]</li>
+<li>Lfilter: frequency-dependent receiver rejection [dB]</li>
+<li>Lcable: receiver path cable loss [dB]</li>
+<li>Llimiter: receiver limiter loss [dB]</li>
+</ul>
+<p>The model is a screening formulation. In particular, classic Friis assumptions do not rigorously hold in the reactive near field; the app therefore either applies a screening correction or allows S21 to override the spatial model.</p>
+<hr />
+<h1>6. Measured / Simulated S21 Override</h1>
+<p>If the transmitter includes a measured or trusted simulated S21 value, the software bypasses the spatial propagation estimate for that link:</p>
+<pre><code class="language-text">Pr,peak = Pt + S21 - Lfilter - Lcable - Llimiter
+</code></pre>
+<p>S21 is expected in dB and is normally negative for passive coupling/isolation.</p>
+<p>This is the preferred workflow for tightly coupled reactive-near-field installations when validated data exist, because a measured/full-wave S21 inherently contains coupling behavior that a simplified Friis-like screening equation cannot reproduce.</p>
+<hr />
+<h1>7. Analytic Antenna Pattern</h1>
+<p>When no pattern CSV is loaded, the app uses the simple analytic attenuation law</p>
+<pre><code class="language-text">A(ψ) = min[Amax, 12(ψ / HPBW)²]
+Geff(ψ) = Gpeak - A(ψ)
+</code></pre>
+<p>where:</p>
+<ul>
+<li>ψ is the off-axis angle,</li>
+<li>HPBW is the entered half-power beamwidth parameter used by the app,</li>
+<li>Amax is the maximum off-axis attenuation.</li>
+</ul>
+<p>This is a smooth engineering approximation, not a universal antenna pattern.</p>
+<h3>1D imported pattern</h3>
+<p>A 1D pattern provides gain vs off-axis angle. The implementation sorts points by angle and performs linear interpolation.</p>
+<h3>2D imported pattern</h3>
+<p>A 2D pattern provides <code>(azimuth offset, elevation offset, gain)</code>. The current implementation selects the nearest supplied 2D sample. Therefore, dense sampling is recommended for 2D CSV data.</p>
+<hr />
+<h1>8. Polarization Loss</h1>
+<p>The current implementation uses the following practical rules:</p>
+<ul>
+<li>same linear polarization: 0 dB</li>
+<li>vertical vs horizontal: 60 dB numerical isolation proxy</li>
+<li>same circular handedness: 0 dB</li>
+<li>RHCP vs LHCP: 60 dB numerical isolation proxy</li>
+<li>linear vs circular: 3.0103 dB</li>
+<li>unknown polarization: 0 dB</li>
+</ul>
+<p>The 60 dB value is a finite software proxy for a theoretically deep orthogonal-polarization null. Real installed platforms rarely achieve ideal orthogonality because of scattering, structural currents, antenna imperfections, and multipath. Critical studies should replace this simplification with measured/certified isolation or S21.</p>
+<hr />
+<h1>9. Fresnel / Radiating-Near-Field Models</h1>
+<p>The simulator provides four choices.</p>
+<h2>9.1 Numerical Aperture Integral</h2>
+<p>For a circular aperture of diameter D, a grid is generated over the aperture. For each aperture sample i, the exact distance to the target is <code>ri</code>.</p>
+<p>The near-field complex sum is approximated by</p>
+<pre><code class="language-text">HNF ≈ Σ exp(-j k ri) / ri
+</code></pre>
+<p>where</p>
+<pre><code class="language-text">k = 2π / λ
+</code></pre>
+<p>A corresponding far-field reference sum is formed from the projected aperture phase:</p>
+<pre><code class="language-text">HFF ≈ Σ exp(j k Δri·r̂) / R
+</code></pre>
+<p>The correction is</p>
+<pre><code class="language-text">C = 10 log10(|HNF|² / |HFF|²)
+</code></pre>
+<p>The implementation clamps the result to a practical numerical range to avoid singular/extreme values during interactive use.</p>
+<p>For the full link, TX and RX aperture corrections are added.</p>
+<h2>9.2 Raw Gamma Approximation</h2>
+<p>The implementation uses</p>
+<pre><code class="language-text">γraw = 1 - exp[-α r λ / D²]
+</code></pre>
+<p>with</p>
+<pre><code class="language-text">α = 0.06
+</code></pre>
+<p>This α is an empirical implementation constant, not a universal electromagnetic constant.</p>
+<h2>9.3 Smooth Gamma</h2>
+<p>The raw gamma is normalized at the far-field boundary:</p>
+<pre><code class="language-text">γsmooth(r) = γraw(r) / γraw(RF)
+</code></pre>
+<p>clamped to a stable numerical interval.</p>
+<p>The TX and RX factors are multiplied and converted to dB:</p>
+<pre><code class="language-text">Cregion = 10 log10(γTX γRX)
+</code></pre>
+<h2>9.4 No Fresnel Correction</h2>
+<p>Keeps the Friis-like baseline without a Fresnel correction.</p>
+<h3>Heat-map optimization</h3>
+<p>When the expensive numerical aperture model is selected, dense heat-map calculations may automatically use the fast smooth-gamma path to preserve interactivity.</p>
+<hr />
+<h1>10. Reactive-Near-Field Screening Correction</h1>
+<p>The reactive region is not rigorously described by Friis transfer. The simulator therefore uses antenna-type-dependent screening factors.</p>
+<p>Let</p>
+<pre><code class="language-text">k = 2π / λ
+x = kr
+</code></pre>
+<h3>Dipole / Monopole</h3>
+<p>The software forms</p>
+<pre><code class="language-text">F = √[(1 - 1/x²)² + (1/x)²]
+Creactive = 20 log10(max(1, F))
+</code></pre>
+<h3>Small Loop</h3>
+<pre><code class="language-text">F = √[1 + 1/x² + 1/x⁴]
+Creactive = 20 log10(max(1, F))
+</code></pre>
+<h3>Generic Aperture</h3>
+<pre><code class="language-text">F = max[1, (R1/r)²]
+Creactive = 20 log10(F)
+</code></pre>
+<p>The correction is capped for numerical robustness. These formulas are best treated as <strong>screening indicators</strong>. In a real reactive-near-field installation, measured or validated full-wave S21 should take precedence.</p>
+<hr />
+<h1>11. Receiver Filter and Front-End Losses</h1>
+<p>The link-specific rejection is</p>
+<pre><code class="language-text">Lfilter = max[0, Lmanual + Lcurve(f)]
+</code></pre>
+<p>where <code>Lcurve(f)</code> is interpolated from the imported receiver filter-response CSV.</p>
+<p>Additional receiver-path terms are then subtracted:</p>
+<pre><code class="language-text">Ltotal_frontend = Lfilter + Lcable + Llimiter
+</code></pre>
+<p>The user must ensure the reference plane is consistent. For example, if TX power is specified after feeder loss, do not subtract that feeder loss a second time elsewhere.</p>
+<hr />
+<h1>12. Pulse Waveform and Average Power</h1>
+<p>For pulse transmission:</p>
+<pre><code class="language-text">Duty = PRF × PulseWidth × 10⁻⁶
+</code></pre>
+<p>with pulse width entered in microseconds.</p>
+<p>The implementation clamps Duty to <code>[10⁻⁹, 1]</code>.</p>
+<p>Average power is</p>
+<pre><code class="language-text">Pr,avg = Pr,peak + 10 log10(Duty)
+</code></pre>
+<p>For CW:</p>
+<pre><code class="language-text">Duty = 1
+Pr,avg = Pr,peak
+</code></pre>
+<p>Peak and average risk are evaluated independently because a receiver may have different pulse and CW damage tolerances.</p>
+<hr />
+<h1>13. Risk and LNA Safety Logic</h1>
+<p>Let</p>
+<pre><code class="language-text">Pallow,pulse = Pdamage,pulse - Msafety
+Pallow,CW    = Pdamage,CW    - Msafety
+</code></pre>
+<p>The software evaluates:</p>
+<pre><code class="language-text">RiskIndex_peak = Pr,peak - Pallow,pulse
+RiskIndex_avg  = Pr,avg  - Pallow,CW
+</code></pre>
+<p>Risk classification for each basis:</p>
+<pre><code class="language-text">Pr ≥ Pdamage                         → CRITICAL
+Pallow ≤ Pr &lt; Pdamage                → HAZARD
+Pallow - WarningBand ≤ Pr &lt; Pallow  → WARNING
+Pr &lt; Pallow - WarningBand           → SAFE
+</code></pre>
+<p>The more severe of peak and average classifications becomes the displayed basis.</p>
+<p>The thresholds are user inputs. The app does not assume that every GaAs, SiGe, CMOS, BiCMOS, or GaN LNA has a common damage rating.</p>
+<hr />
+<h1>14. Multiple-Transmitter Aggregation</h1>
+<h2>14.1 Incoherent Power Sum</h2>
+<p>Each dBm value is converted to watts:</p>
+<pre><code class="language-text">Pi(W) = 10^[(Pi,dBm - 30)/10]
+</code></pre>
+<p>Then</p>
+<pre><code class="language-text">Ptotal(W) = Σ Pi(W)
+Ptotal,dBm = 10 log10(Ptotal) + 30
+</code></pre>
+<h2>14.2 Worst-Case Coherent-by-Frequency Mode</h2>
+<p>Transmitters are grouped if their frequencies lie within the configured tolerance. Within a group, the simulator sums square-root power amplitudes conservatively:</p>
+<pre><code class="language-text">Agroup = Σ √Pi
+Pgroup = Agroup²
+</code></pre>
+<p>Different frequency groups are then summed in power.</p>
+<p>This is a conservative envelope, not a phase-synchronized waveform simulation.</p>
+<hr />
+<h1>15. Naval Structural Obstruction and Knife-Edge Screening</h1>
+<p>The Naval geometry engine tests the TX→RX segment against simplified axis-aligned 3D boxes representing masts, bridge blocks, and other structures.</p>
+<p>For an intersected structure, the software estimates clearance h above the ray and forms the Fresnel knife-edge parameter</p>
+<pre><code class="language-text">ν = h √[ 2(d1 + d2) / (λ d1 d2) ]
+</code></pre>
+<p>The standard smooth knife-edge approximation used in the code is</p>
+<pre><code class="language-text">LKE = 0                                           for ν ≤ -0.78
+LKE = 6.9 + 20 log10( √[(ν - 0.1)² + 1] + ν - 0.1 )  otherwise
+</code></pre>
+<p>For multiple blockers, the strongest blocker is retained and an optional additional-blocker penalty is added. The total is capped for numerical/engineering stability.</p>
+<p>A Fixed Block Loss mode and a Disabled mode are also available.</p>
+<hr />
+<h1>16. Aircraft Curved Fuselage Geometry</h1>
+<p>The aircraft fuselage is represented as a longitudinally tapered ellipse. At a given X position, local semi-axes are</p>
+<pre><code class="language-text">ry(x) = 0.5 × FuselageWidth × Scale(x)
+rz(x) = 0.5 × FuselageHeight × Scale(x)
+</code></pre>
+<p>The local implicit fuselage equation is</p>
+<pre><code class="language-text">y²/ry² + z²/rz² - 1 = 0
+</code></pre>
+<p>A negative value indicates a point inside the fuselage.</p>
+<h3>Direct-path blockage</h3>
+<p>The TX→RX segment is sampled at multiple interior points. If samples penetrate sufficiently inside the fuselage, the direct path is marked blocked.</p>
+<h3>Surface ray picking</h3>
+<p>For SURFACE RX mode, the camera ray is sampled until it crosses from outside to inside the implicit fuselage. A binary refinement finds the skin intersection. Wing and tail surfaces are also tested as planar/polygonal surfaces.</p>
+<p>This creates visually intuitive surface placement without requiring a CAD mesh or GPU ray-tracing library.</p>
+<hr />
+<h1>17. Aircraft Creeping-Wave Approximation</h1>
+<p>The user-supplied report discusses curved-fuselage surface creeping waves and gives a qualitative UTD-style form. The simulator uses the corresponding engineering structure rather than claiming a full UTD solution.</p>
+<p>A representative form is</p>
+<pre><code class="language-text">E(s) ∝ 1/√s × exp[-αcw (k/a²)^(1/3) s]
+</code></pre>
+<p>where:</p>
+<ul>
+<li>s = surface path length</li>
+<li>a = representative local curvature radius</li>
+<li>k = 2π/λ</li>
+<li>αcw = empirical coefficient</li>
+</ul>
+<h3>Geodesic-like path</h3>
+<p>The software projects TX and RX access points onto the elliptical fuselage. It computes angular separation around an equivalent ellipse and combines the circumferential arc with longitudinal separation.</p>
+<p>The surface route length is approximated by</p>
+<pre><code class="language-text">Scurved = √(Δx² + (aeq Δθ)²)
+Ssurface = Saccess,TX + Scurved + Saccess,RX
+</code></pre>
+<p>with an equivalent radius based on the local ellipse.</p>
+<h3>Path-length penalty</h3>
+<pre><code class="language-text">Lpath = 20 log10(max[1, Ssurface / Sdirect])
+</code></pre>
+<h3>Empirical curvature attenuation</h3>
+<p>The implementation forms an attenuation exponent in nepers:</p>
+<pre><code class="language-text">N = αcw (k/a²)^(1/3) Ssurface
+</code></pre>
+<p>and converts to dB:</p>
+<pre><code class="language-text">Lempirical = 8.686 N + Lfixed_surface
+</code></pre>
+<p>Total surface loss:</p>
+<pre><code class="language-text">Lsurface = min[Lmax, Lpath + Lempirical]
+</code></pre>
+<p>The default <code>αcw = 0</code> is intentional and conservative. The supplied report does not provide a universal coefficient valid for all aircraft materials, frequencies, coatings, panel joints, and antenna types.</p>
+<hr />
+<h1>18. Aircraft Surface Heat Map</h1>
+<p>A regular X–Y sampling grid is constructed over the aircraft planform. Candidate points are accepted if they lie on:</p>
+<ul>
+<li>fuselage,</li>
+<li>main wing,</li>
+<li>tailplane.</li>
+</ul>
+<p>For fuselage locations, both upper and lower surface points may be evaluated.</p>
+<p>At each candidate RX point:</p>
+<ol>
+<li>every transmitter link is recalculated,</li>
+<li>curved-fuselage / creeping-wave logic is applied,</li>
+<li>rotor dynamics are applied for helicopter mode when enabled,</li>
+<li>multiple transmitters are aggregated,</li>
+<li>the resulting risk class is assigned to the surface cell.</li>
+</ol>
+<p>The result is rendered directly on the 3D aircraft skin.</p>
+<hr />
+<h1>19. Near-Field Shell and Fog Rendering</h1>
+<p>The theoretical shell uses the same region-boundary equations as the RF classifier.</p>
+<p>Visual fog may include:</p>
+<ul>
+<li>modest radiation-pattern weighting,</li>
+<li>obstruction-aware shaping,</li>
+<li>animated opacity,</li>
+<li>quality-dependent slice density.</li>
+</ul>
+<p>Important distinction:</p>
+<pre><code class="language-text">Theoretical Shell = electromagnetic region boundary estimate
+Visual Fog        = intuitive spatial visualization aid
+Damage Zone       = separate receiver/LNA power-risk calculation
+</code></pre>
+<p>These concepts should not be conflated.</p>
+<hr />
+<h1>20. Helicopter Tandem-Rotor Geometry</h1>
+<p>The Stage 4B generic Chinook-class template uses two tandem rotor discs. The public aircraft scale is used as a visual/engineering reference, while exact operational antenna locations are not reproduced.</p>
+<p>Each rotor has:</p>
+<ul>
+<li>center position,</li>
+<li>radius,</li>
+<li>blade count,</li>
+<li>RPM,</li>
+<li>rotation direction,</li>
+<li>phase offset,</li>
+<li>hub radius.</li>
+</ul>
+<p>The forward and aft rotors rotate in opposite directions in the generic model.</p>
+<hr />
+<h1>21. Blade Passing Frequency</h1>
+<p>For a rotor with <code>Nb</code> blades and rotational speed RPM:</p>
+<pre><code class="language-text">frotor = RPM / 60
+fBPF   = Nb × RPM / 60
+</code></pre>
+<p>For example, a three-blade rotor at 225 RPM has:</p>
+<pre><code class="language-text">frotor = 3.75 Hz
+fBPF   = 11.25 Hz
+</code></pre>
+<p>RPM remains editable because actual operating speed and test condition must come from validated platform data.</p>
+<hr />
+<h1>22. Rotor-Disc Intersection</h1>
+<p>The rotor disc is modeled as a horizontal plane at the rotor center Z.</p>
+<p>For TX point p0 and RX point p1, the line is</p>
+<pre><code class="language-text">p(t) = p0 + t(p1 - p0),  0 ≤ t ≤ 1
+</code></pre>
+<p>The intersection with rotor plane <code>z = zr</code> is obtained from</p>
+<pre><code class="language-text">t = (zr - z0) / (z1 - z0)
+</code></pre>
+<p>The radial distance from rotor center is</p>
+<pre><code class="language-text">ρ = √[(x - xr)² + (y - yr)²]
+</code></pre>
+<p>The path crosses the active rotor annulus if</p>
+<pre><code class="language-text">Rhub ≤ ρ ≤ Rrotor
+</code></pre>
+<hr />
+<h1>23. Blade Angular Overlap and Shadowing</h1>
+<p>At the disc intersection, the azimuth is</p>
+<pre><code class="language-text">φlink = atan2(y - yr, x - xr)
+</code></pre>
+<p>For each blade, the software computes the minimum angular difference between <code>φlink</code> and the instantaneous blade azimuth.</p>
+<p>Let the user-defined full blade angular width be <code>Wb</code>. With half-width <code>Wb/2</code>, a soft overlap factor is</p>
+<pre><code class="language-text">O = clamp[1 - Δφ/(Wb/2), 0, 1]
+</code></pre>
+<p>A radial weighting increases the effect toward the outer active blade span. The resulting shadowing loss is</p>
+<pre><code class="language-text">Lshadow = Lshadow,max × Oweighted
+</code></pre>
+<p>This is a geometric engineering model; it does not solve scattering from a real composite/metal blade.</p>
+<hr />
+<h1>24. Rotor Blade Modulation (RBM)</h1>
+<p>The report describes periodic amplitude/phase/polarization and impedance variation as rotor blades move near or through antenna fields. The simulator represents this with a tunable periodic isolation term.</p>
+<p>A simplified software form is</p>
+<pre><code class="language-text">ΔIRBM = ARBM cos(Nb θr + δ) × Wgeometry
+</code></pre>
+<p>where:</p>
+<ul>
+<li>ARBM = user-entered isolation swing [dB]</li>
+<li>Nb = blade count</li>
+<li>θr = instantaneous rotor phase</li>
+<li>δ = geometry/rotor phase offset</li>
+<li>Wgeometry = rotor-disc/proximity weighting</li>
+</ul>
+<p>The sign changes with phase. A negative isolation delta means less isolation and therefore higher receiver input — the safety-worst direction.</p>
+<p>The total dynamic additional link loss is</p>
+<pre><code class="language-text">Ldynamic = Lshadow + ΔIRBM
+</code></pre>
+<p>and the adjusted link is obtained from the base aircraft link by subtracting this signed quantity from receiver input.</p>
+<hr />
+<h1>25. Effective Terminal Isolation</h1>
+<p>For reporting, the simulator defines</p>
+<pre><code class="language-text">Ieffective = Pt - Pr,peak
+</code></pre>
+<p>This is called <strong>effective terminal isolation</strong> because it may include antenna gains, propagation, filters, cable/limiter terms, surface effects, and rotor dynamics. It is not necessarily the same reference-plane definition as a two-port antenna-to-antenna S21 measurement.</p>
+<p>Reference planes must therefore be documented when comparing software values to measured isolation.</p>
+<hr />
+<h1>26. Worst-Case Rotor Scan</h1>
+<p>The master rotor phase is sampled from 0° to 360° over N points:</p>
+<pre><code class="language-text">θi = 360° i / N,  i = 0 ... N-1
+</code></pre>
+<p>At each phase:</p>
+<ol>
+<li>base aircraft propagation is retained,</li>
+<li>each transmitter receives rotor shadow/RBM adjustment,</li>
+<li>all adjusted links are aggregated,</li>
+<li>peak and average risks are evaluated.</li>
+</ol>
+<p>The worst overall phase is the phase maximizing the overall risk index.</p>
+<p>Per transmitter, the software records the phase giving the maximum peak receiver input, which corresponds to the minimum effective isolation for that modeled installation.</p>
+<p>Increasing N improves angular resolution at the cost of compute time.</p>
+<hr />
+<h1>27. Transmitter Set JSON</h1>
+<p>Stage 4B-1 supports a reusable transmitter collection:</p>
+<pre><code class="language-json">{
+  &quot;format&quot;: &quot;Antenna Safety Simulator Transmitter Set&quot;,
+  &quot;schemaVersion&quot;: 1,
+  &quot;profileName&quot;: &quot;Chinook Test Set A&quot;,
+  &quot;platformType&quot;: &quot;aircraft&quot;,
+  &quot;platformId&quot;: &quot;generic_chinook_tandem&quot;,
+  &quot;aircraftClass&quot;: &quot;helicopter&quot;,
+  &quot;transmitters&quot;: [
+    { &quot;...&quot;: &quot;AntennaSpec JSON&quot; }
+  ]
+}
+</code></pre>
+<p>This file intentionally does not replace receiver or aircraft geometry.</p>
+<hr />
+<h1>28. Individual Transmitter JSON and Transmitter-Set JSON</h1>
+<p>An individual TX profile uses a <code>transmitter</code> object containing one complete <code>AntennaSpec</code>. A transmitter-set profile stores the full <code>transmitters</code> array. These formats support reuse of commercial, mission, or user-characterized antennas without forcing aircraft geometry to change.</p>
+<h1>29. Complete Aircraft Project JSON</h1>
+<p>A complete Aircraft Project stores:</p>
+<ul>
+<li>projectName</li>
+<li>AircraftPlatform</li>
+<li>ReceiverSpec</li>
+<li>transmitter array</li>
+<li>RfEngineSettings</li>
+<li>FieldZoneSettings</li>
+<li>AircraftPropagationSettings</li>
+<li>HelicopterRotorSettings when applicable</li>
+<li>rotor phase when applicable</li>
+</ul>
+<p>This is the preferred format for preserving an entire engineering study state.</p>
+<hr />
+<h1>30. Responsive UI and Android Tablets</h1>
+<p>The Flutter UI uses width-driven <code>LayoutBuilder</code> decisions rather than an iPad-only code path.</p>
+<p>Examples:</p>
+<pre><code class="language-text">Platform selector: wide-card layout when enough width is available
+Aircraft planner:   side-by-side 3D + panel when maxWidth ≥ configured threshold
+Phone:              stacked visualization + panel
+</code></pre>
+<p>Therefore a large Android tablet window will generally behave like an iPad/desktop wide window.</p>
+<p>Nevertheless, Android tablet validation is still required because of:</p>
+<ul>
+<li>different aspect ratios,</li>
+<li>portrait/landscape dimensions,</li>
+<li>Android navigation bars,</li>
+<li>display cutouts,</li>
+<li>system font scaling,</li>
+<li>multi-window / split-screen,</li>
+<li>foldable window resizing.</li>
+</ul>
+<p>A responsive app should be tested against <strong>window size</strong>, not simply device type.</p>
+<hr />
+<h1>31. Source-Derived Principles vs Implementation Assumptions</h1>
+<h2>Principles supported by the supplied aircraft report</h2>
+<p>The report supports the importance of:</p>
+<ul>
+<li>co-site interference on aircraft,</li>
+<li>near-field coupling,</li>
+<li>reactive / radiating / far-field classification,</li>
+<li>fuselage curvature and surface propagation,</li>
+<li>rotor shadowing,</li>
+<li>Rotor Blade Modulation,</li>
+<li>time-varying isolation,</li>
+<li>desensitization / gain compression,</li>
+<li>LNA burnout risk,</li>
+<li>worst-case rotor-angle consideration,</li>
+<li>mitigation by filtering, limiting, blanking, cancellation, and separation.</li>
+</ul>
+<h2>Implementation assumptions introduced by the app</h2>
+<p>The following are practical software approximations rather than universal constants from the report:</p>
+<ul>
+<li>smooth-gamma α = 0.06,</li>
+<li>generic reactive-near-field correction functions,</li>
+<li>60 dB orthogonal-polarization numerical proxy,</li>
+<li>box-based Naval obstruction geometry,</li>
+<li>simplified aircraft tapered ellipse,</li>
+<li>geodesic-like rather than full UTD creeping path,</li>
+<li>user-tunable creeping αcw,</li>
+<li>user-tunable rotor shadowing loss,</li>
+<li>user-tunable RBM isolation swing,</li>
+<li>simplified rotor-disc/blade angular overlap.</li>
+</ul>
+<p>These distinctions are important for traceability and responsible engineering use.</p>
+<hr />
+<h1>32. Equations Mentioned in the Source but Not Used as Active Core Equations</h1>
+<p>The supplied report includes additional formulas and empirical relationships, including example horizontal/vertical antenna isolation expressions, phased-array far-field extensions, and device-technology examples. They are <strong>not automatically hardcoded into the current RF power engine</strong> unless explicitly described above.</p>
+<p>This is intentional. Platform-specific empirical formulas should not silently replace the common RF engine without validated applicability to the user's actual installation.</p>
+<hr />
+<h1>33. Verification Hierarchy</h1>
+<p>For critical installation decisions, use the following hierarchy:</p>
+<ol>
+<li><strong>Installed measurement / S-parameter test</strong> at documented reference planes.</li>
+<li><strong>Validated full-wave EM analysis</strong> with realistic aircraft/ship geometry, materials, radomes, cables, and antenna ports.</li>
+<li><strong>Platform-specific qualification data</strong> and manufacturer component limits.</li>
+<li><strong>Antenna Safety Simulator</strong> for screening, comparison, visualization, what-if studies, and identifying cases that require more rigorous analysis.</li>
+</ol>
+<p>The simulator is most valuable as an interactive engineering decision-support layer around these higher-fidelity sources.</p>
+<hr />
+<h1>34. Recommended Documentation for Each Study</h1>
+<p>Save or record:</p>
+<ul>
+<li>project name and date,</li>
+<li>platform geometry version,</li>
+<li>transmitter-set profile name,</li>
+<li>antenna model and data source,</li>
+<li>power reference plane,</li>
+<li>cable/filter/limiter state,</li>
+<li>receiver/LNA limit source,</li>
+<li>radiation-pattern source,</li>
+<li>measured S21 source and reference planes,</li>
+<li>creeping-wave coefficient source if nonzero,</li>
+<li>rotor RPM, blade width, shadowing loss, RBM amplitude source,</li>
+<li>worst-case scan resolution,</li>
+<li>resulting peak/average risk,</li>
+<li>validation method used after screening.</li>
+</ul>
+<p>This creates traceability between the interactive model and the actual engineering decision.</p>
+</body></html>
